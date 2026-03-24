@@ -115,51 +115,62 @@ class VPNClientApp(ctk.CTk):
 
     # ---------------- VPN Subprocess Control ---------------- #
     def start_vpn(self, srv, show_console=False):
-        self.stop_vpn(switch_page=False)
-
-        import os, shutil
-
+        """Launches the VPN client subprocess and switches to the Connected Page."""
+        self.stop_vpn(switch_page=False) # Clean up any existing connection first
+        
         target_ip = srv.get("host", "127.0.0.1")
         target_port = str(srv.get("port", "8000"))
-
-        script_path = os.path.join("client", "client.py")
-
-        print(f"[GUI] Launching VPN subprocess for {srv['name']} at {target_ip}:{target_port}...")
-
+        
+        print(f"[GUI] Launching VPN subprocess for {srv.get('name', 'Unknown')} at {target_ip}:{target_port}...")
+        
         try:
-            cmd = [sys.executable, script_path, target_ip, target_port]
-            kwargs = {}
-
             if sys.platform.startswith("linux"):
                 if show_console:
-                    terminal = shutil.which("xterm") or shutil.which("gnome-terminal") or shutil.which("konsole")
-                    if terminal:
-                        if "xterm" in terminal:
-                            cmd = [terminal, "-hold", "-e"] + cmd
-                        else:
-                            cmd = [terminal, "--"] + cmd
-                    else:
-                        messagebox.showwarning("Warning", "No terminal found, running in background.")
+                    # Explicitly launch a terminal emulator to see the output on Linux
+                    cmd = ["xterm", "-hold", "-e", sys.executable, "vpn_client.py", target_ip, target_port]
+                    self.active_vpn_process = subprocess.Popen(cmd)
                 else:
-                    log_file = open("vpn_client.log", "a")
-                    kwargs["stdout"] = log_file
-                    kwargs["stderr"] = log_file
-
+                    # Runs silently in the background
+                    cmd = [sys.executable, "vpn_client.py", target_ip, target_port]
+                    self.active_vpn_process = subprocess.Popen(
+                        cmd, 
+                        stdout=subprocess.DEVNULL, 
+                        stderr=subprocess.DEVNULL
+                    )
+                    
             elif sys.platform == "win32":
+                subprocess_kwargs = {}
                 if show_console:
-                    kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
+                    subprocess_kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
                 else:
-                    kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-
-            self.active_vpn_process = subprocess.Popen(cmd, **kwargs)
+                    subprocess_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+                cmd = [sys.executable, "vpn_client.py", target_ip, target_port]
+                self.active_vpn_process = subprocess.Popen(cmd, **subprocess_kwargs)
+                
+            else:
+                # Mac / Default fallback
+                cmd = [sys.executable, "vpn_client.py", target_ip, target_port]
+                self.active_vpn_process = subprocess.Popen(cmd)
 
             self.connected_server = srv
-
-            # Check process actually started
-            self.after(500, self._check_vpn_started)
-
+            self.show_frame("ConnectedPage")
+            
         except Exception as e:
             messagebox.showerror("Execution Error", f"Failed to start VPN client:\n{e}")
+
+    def stop_vpn(self, switch_page=True):
+        """Kills the running VPN client subprocess."""
+        if self.active_vpn_process is not None:
+            if self.active_vpn_process.poll() is None: 
+                self.active_vpn_process.terminate()
+                self.active_vpn_process.wait() # Ensure it has fully closed
+            
+            print("[GUI] Terminated VPN connection.")
+            self.active_vpn_process = None
+            self.connected_server = None
+            
+        if switch_page:
+            self.show_frame("VPNPage")
 
 
 # ---------------- Pages ---------------- #
@@ -308,6 +319,11 @@ class VPNPage(BasePage):
                                          font=("Arial", 14), command=self.manual_refresh)
         self.refresh_btn.pack(side="right", padx=10)
 
+        self.show_console_var = ctk.BooleanVar(value=False)
+        self.console_checkbox = ctk.CTkCheckBox(self.nav_bar, text="Show Debug Console", 
+                                                variable=self.show_console_var)
+        self.console_checkbox.pack(side="right", padx=15)
+
         # --- Dropdown Profile Menu ---
         self.menu_visible = False
         self.menu_frame = ctk.CTkFrame(self, width=150, corner_radius=10, border_width=1, border_color="gray30")
@@ -380,15 +396,17 @@ class VPNPage(BasePage):
             row = ctk.CTkFrame(self.server_frame, fg_color=("gray80", "gray15"), corner_radius=8)
             row.pack(fill="x", pady=5, padx=5)
             
-            name_lbl = ctk.CTkLabel(row, text=srv["name"], font=("Arial", 16, "bold"))
+            name_lbl = ctk.CTkLabel(row, text=srv.get("name", "Unknown Server"), font=("Arial", 16, "bold"))
             name_lbl.pack(side="left", padx=15, pady=15)
             
-            load_lbl = ctk.CTkLabel(row, text=f"Load: {srv['load']}", text_color="gray")
+            load_lbl = ctk.CTkLabel(row, text=f"Load: {srv.get('load', '0%')}", text_color="gray")
             load_lbl.pack(side="left", padx=20)
             
             conn_btn = ctk.CTkButton(row, text="Connect", width=80, 
                                      fg_color="#2E7D32", hover_color="#1B5E20",
-                                     command=lambda s=srv: self.controller.start_vpn(s))
+                                     command=lambda s=srv: self.controller.start_vpn(
+                                         s, show_console=self.show_console_var.get()
+                                     ))
             conn_btn.pack(side="right", padx=15)
 
     def logoff(self):
@@ -464,14 +482,12 @@ class ConnectedPage(BasePage):
         if self.controller.current_user:
             self.user_label.configure(text=f"Logged in as:\n{self.controller.current_user}")
         
-        # Pull the server name from the controller's active variable
         if self.controller.connected_server:
-            self.server_name_label.configure(text=self.controller.connected_server["name"])
+            self.server_name_label.configure(text=self.controller.connected_server.get("name", "Unknown Server"))
 
     def logoff(self):
         if not self.controller.current_user or self.controller.waiting_response: return
         
-        # Kill the VPN tunnel without switching back to the list page
         self.controller.stop_vpn(switch_page=False)
         
         self.logoff_btn.configure(state="disabled")
