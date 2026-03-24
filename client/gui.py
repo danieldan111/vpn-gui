@@ -3,6 +3,7 @@ from tkinter import messagebox
 import customtkinter as ctk
 import subprocess
 import sys
+import shutil
 
 # --- UI Setup ---
 ctk.set_appearance_mode("Dark")
@@ -116,7 +117,7 @@ class VPNClientApp(ctk.CTk):
     # ---------------- VPN Subprocess Control ---------------- #
     def start_vpn(self, srv, show_console=False):
         """Launches the VPN client subprocess and schedules a health check."""
-        self.stop_vpn(switch_page=False) # Clean up any existing connection first
+        self.stop_vpn(switch_page=False) 
         
         target_ip = srv.get("host", "127.0.0.1")
         target_port = str(srv.get("port", "8000"))
@@ -124,38 +125,44 @@ class VPNClientApp(ctk.CTk):
         print(f"[GUI] Attempting to launch VPN subprocess for {srv.get('name', 'Unknown')} at {target_ip}:{target_port}...")
         
         try:
-            cmd = [sys.executable, "vpn_client.py", target_ip, target_port]
+            cmd = [sys.executable, "client/client.py", target_ip, target_port]
             kwargs = {}
             
             if show_console:
                 if sys.platform.startswith("linux"):
-                    cmd = ["xterm", "-hold", "-e"] + cmd
+                    # Auto-detect available Linux terminals
+                    if shutil.which("gnome-terminal"):
+                        # GNOME (Ubuntu/Fedora default)
+                        bash_cmd = f"{sys.executable} vpn_client.py {target_ip} {target_port}; read -p 'Press Enter to exit...'"
+                        cmd = ["gnome-terminal", "--", "bash", "-c", bash_cmd]
+                    elif shutil.which("konsole"):
+                        # KDE Plasma default
+                        bash_cmd = f"{sys.executable} vpn_client.py {target_ip} {target_port}; read -p 'Press Enter to exit...'"
+                        cmd = ["konsole", "-e", "bash", "-c", bash_cmd]
+                    elif shutil.which("xfce4-terminal"):
+                        # XFCE / Kali Linux default
+                        bash_cmd = f"{sys.executable} vpn_client.py {target_ip} {target_port}; read -p 'Press Enter to exit...'"
+                        cmd = ["xfce4-terminal", "--command", f"bash -c \"{bash_cmd}\""]
+                    elif shutil.which("xterm"):
+                        cmd = ["xterm", "-hold", "-e"] + cmd
+                    else:
+                        messagebox.showerror("Error", "Could not find a standard terminal emulator to open the console.")
+                        return
+                    
+                    self.active_vpn_process = subprocess.Popen(cmd)
+                    
                 elif sys.platform == "win32":
                     kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
+                    self.active_vpn_process = subprocess.Popen(cmd, **kwargs)
             else:
                 if sys.platform == "win32":
                     kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
                 
-                # If running hidden, capture the error output to see why it crashes
                 kwargs["stdout"] = subprocess.PIPE
                 kwargs["stderr"] = subprocess.PIPE
                 kwargs["text"] = True
-
-            try:
                 self.active_vpn_process = subprocess.Popen(cmd, **kwargs)
-            except FileNotFoundError as e:
-                # Catch the specific Linux xterm missing error
-                if "xterm" in str(e) or (sys.platform.startswith("linux") and show_console):
-                    messagebox.showerror(
-                        "Missing Software", 
-                        "Cannot open debug console because 'xterm' is not installed.\n\n"
-                        "Please uncheck 'Show Debug Console', OR install it by running:\n"
-                        "sudo apt install xterm"
-                    )
-                    return
-                else:
-                    raise e
-            
+
             # Wait 500ms and check if the process survived
             self.after(500, self.verify_vpn_connection, srv)
             
