@@ -117,6 +117,13 @@ def logoff(username, addr):
 
 def vpn_server_login(data, addr):
     server_name = data.get("server_name")
+    
+    # Extract the VPN's UDP port from the JSON (default to 50505 if missing)
+    vpn_port = data.get("port", 50505) 
+    
+    # addr is a tuple of (IP, TCP_PORT). We just want the IP.
+    client_ip = addr[0]                
+
     if not server_name:
          return {"cmd": "EROR", "msg": "Missing server name"}
          
@@ -124,18 +131,24 @@ def vpn_server_login(data, addr):
     if is_valid:
         with server_lock:
             available_servers[server_name] = {
-                "addr": addr, 
+                "host": client_ip,            # Save the IP
+                "port": vpn_port,             # Save the UDP port
                 "display_name": display_name,
-                "load": "12%" # Mock load
+                "load": "12%"                 # Mock load
             }
-        print(f"[BROKER] VPN Node '{display_name}' connected from {addr}")
+        print(f"[BROKER] VPN Node '{display_name}' connected from {client_ip}:{vpn_port}")
         return {"cmd": "CNFM", "action": "SLGN"}
     return {"cmd": "EROR", "msg": "Unknown VPN server"}
 
 def get_server_list():
     with server_lock:
         server_list = [
-            {"id": s_name, "name": s_info["display_name"], "load": s_info["load"]}
+            {
+                "name": s_info["display_name"], 
+                "host": s_info["host"],     # Send the IP to the GUI
+                "port": s_info["port"],     # Send the Port to the GUI
+                "load": s_info["load"]
+            }
             for s_name, s_info in available_servers.items()
         ]
     return {"cmd": "SRVS", "servers": server_list}
