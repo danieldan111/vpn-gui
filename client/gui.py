@@ -3,11 +3,32 @@ from tkinter import messagebox
 import customtkinter as ctk
 import subprocess
 import sys
-import shutil
+import threading
 
 # --- UI Setup ---
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
+
+# --- Built-In Debug Console ---
+class DebugConsole(ctk.CTkToplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("VPN Live Logs")
+        self.geometry("700x450")
+        
+        # Make the window pop to the front
+        self.attributes("-topmost", True)
+        
+        self.textbox = ctk.CTkTextbox(self, font=("Courier", 14), fg_color="black", text_color="#00FF00")
+        self.textbox.pack(fill="both", expand=True, padx=10, pady=10)
+        self.textbox.configure(state="disabled")
+
+    def write_log(self, text):
+        self.textbox.configure(state="normal")
+        self.textbox.insert("end", text)
+        self.textbox.see("end")  # Auto-scroll to the bottom
+        self.textbox.configure(state="disabled")
+
 
 class VPNClientApp(ctk.CTk):
     def __init__(self):
@@ -24,6 +45,7 @@ class VPNClientApp(ctk.CTk):
         # --- Track the VPN subprocess globally ---
         self.active_vpn_process = None
         self.connected_server = None  
+        self.debug_window = None
         
         self.current_frame_name = "ConnectingPage"
 
@@ -52,7 +74,7 @@ class VPNClientApp(ctk.CTk):
         self.show_frame("HomePage")
 
     def connection_lost(self):
-        messagebox.showerror("Network Error", "Lost connection to the server.")
+        messagebox.showerror("Network Error", "Lost connection to the broker server.")
         self.destroy()
 
     def set_waiting(self, is_waiting):
@@ -116,82 +138,76 @@ class VPNClientApp(ctk.CTk):
 
     # ---------------- VPN Subprocess Control ---------------- #
     def start_vpn(self, srv, show_console=False):
-        """Launches the VPN client subprocess and schedules a health check."""
+        """Launches the VPN client subprocess and captures its output internally."""
         self.stop_vpn(switch_page=False) 
         
         target_ip = srv.get("host", "127.0.0.1")
         target_port = str(srv.get("port", "8000"))
         
-        print(f"[GUI] Attempting to launch VPN subprocess for {srv.get('name', 'Unknown')} at {target_ip}:{target_port}...")
+        # -u flag forces unbuffered output so we get logs instantly
+        print(f"[CLIENT] connecting to vpn server at ({target_ip}, {target_port})")
+        cmd = [sys.executable, "-u", "client/client.py", target_ip, target_port]
         
-        try:
-            cmd = [sys.executable, "client/client.py", target_ip, target_port]
-            kwargs = {}
-            
-            if show_console:
-                if sys.platform.startswith("linux"):
-                    # Auto-detect available Linux terminals
-                    if shutil.which("gnome-terminal"):
-                        # GNOME (Ubuntu/Fedora default)
-                        bash_cmd = f"{sys.executable} vpn_client.py {target_ip} {target_port}; read -p 'Press Enter to exit...'"
-                        cmd = ["gnome-terminal", "--", "bash", "-c", bash_cmd]
-                    elif shutil.which("konsole"):
-                        # KDE Plasma default
-                        bash_cmd = f"{sys.executable} vpn_client.py {target_ip} {target_port}; read -p 'Press Enter to exit...'"
-                        cmd = ["konsole", "-e", "bash", "-c", bash_cmd]
-                    elif shutil.which("xfce4-terminal"):
-                        # XFCE / Kali Linux default
-                        bash_cmd = f"{sys.executable} vpn_client.py {target_ip} {target_port}; read -p 'Press Enter to exit...'"
-                        cmd = ["xfce4-terminal", "--command", f"bash -c \"{bash_cmd}\""]
-                    elif shutil.which("xterm"):
-                        cmd = ["xterm", "-hold", "-e"] + cmd
-                    else:
-                        messagebox.showerror("Error", "Could not find a standard terminal emulator to open the console.")
-                        return
-                    
-                    self.active_vpn_process = subprocess.Popen(cmd)
-                    
-                elif sys.platform == "win32":
-                    kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
-                    self.active_vpn_process = subprocess.Popen(cmd, **kwargs)
-            else:
-                if sys.platform == "win32":
-                    kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-                
-                kwargs["stdout"] = subprocess.PIPE
-                kwargs["stderr"] = subprocess.PIPE
-                kwargs["text"] = True
-                self.active_vpn_process = subprocess.Popen(cmd, **kwargs)
+        kwargs = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.STDOUT, # Merge errors into standard output
+            "text": True,
+            "bufsize": 1
+        }
+        
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 
-            # Wait 500ms and check if the process survived
-            self.after(500, self.verify_vpn_connection, srv)
+        try:
+            self.active_vpn_process = subprocess.Popen(cmd, **kwargs)
+
+            if show_console:
+                self.debug_window = DebugConsole(self)
+
+            # Start background thread to read logs without freezing the GUI
+            threading.Thread(
+                target=self.monitor_vpn_output, 
+                args=(self.active_vpn_process, self.debug_window), 
+                daemon=True
+            ).start()
+
+            # Wait 1000ms to see if it crashes before switching to ConnectedPage
+            self.after(1000, self.verify_vpn_connection, srv, show_console)
             
         except Exception as e:
             messagebox.showerror("Execution Error", f"Failed to execute VPN script:\n{e}")
 
-    def verify_vpn_connection(self, srv):
-        """Checks if the subprocess is still running after launch."""
+    def monitor_vpn_output(self, process, debug_window):
+        """Reads the subprocess output line by line in real-time."""
+        for line in iter(process.stdout.readline, ''):
+            if debug_window and debug_window.winfo_exists():
+                # Safely tell Tkinter to update the UI from this background thread
+                self.after(0, debug_window.write_log, line)
+            
+            # Also print to your IDE terminal just in case
+            print(f"[VPN Client] {line}", end="")
+            
+        process.stdout.close()
+
+    def verify_vpn_connection(self, srv, show_console):
+        """Checks if the subprocess is still running after 1 second."""
         if self.active_vpn_process is None:
             return
 
-        # .poll() returns None if the process is healthy and running.
         return_code = self.active_vpn_process.poll()
 
         if return_code is None:
-            # It survived! Safely switch to the connected dashboard.
             print("[GUI] VPN Process verified. Switching to Connected dashboard.")
             self.connected_server = srv
             self.show_frame("ConnectedPage")
         else:
-            # It crashed instantly. Gather error details.
-            error_msg = f"The VPN script crashed immediately (Exit Code {return_code})."
-            
-            if self.active_vpn_process.stderr:
-                err_output = self.active_vpn_process.stderr.read()
-                if err_output:
-                    error_msg += f"\n\nPython Error Details:\n{err_output.strip()}"
-            
-            messagebox.showerror("VPN Connection Failed", error_msg)
+            msg = f"The VPN script crashed quickly (Exit Code {return_code})."
+            if show_console:
+                msg += "\n\nPlease look at the green Debug Console window to see the exact error."
+            else:
+                msg += "\n\nPlease check 'Show Debug Console' and try again to see why it crashed."
+                
+            messagebox.showerror("VPN Connection Failed", msg)
             self.active_vpn_process = None
             self.connected_server = None
             
@@ -203,11 +219,18 @@ class VPNClientApp(ctk.CTk):
         if self.active_vpn_process is not None:
             if self.active_vpn_process.poll() is None: 
                 self.active_vpn_process.terminate()
-                self.active_vpn_process.wait() # Ensure it has fully closed
+                self.active_vpn_process.wait() 
             
             print("[GUI] Terminated VPN connection.")
             self.active_vpn_process = None
             self.connected_server = None
+            
+        if hasattr(self, 'debug_window') and self.debug_window is not None:
+            try:
+                self.debug_window.destroy()
+            except:
+                pass
+            self.debug_window = None
             
         if switch_page:
             self.show_frame("VPNPage")
@@ -226,7 +249,7 @@ class BasePage(ctk.CTkFrame):
 class ConnectingPage(BasePage):
     def __init__(self, parent, controller):
         super().__init__(parent, controller)
-        label = ctk.CTkLabel(self, text="Connecting to Server...", font=("Arial", 28))
+        label = ctk.CTkLabel(self, text="Connecting to Broker...", font=("Arial", 28))
         label.pack(expand=True)
 
 class HomePage(BasePage):
@@ -514,7 +537,6 @@ class ConnectedPage(BasePage):
             self.menu_visible = True
 
     def clear_fields(self):
-        """Called automatically when the user arrives on this page."""
         self.menu_frame.place_forget()
         self.menu_visible = False
         self.logoff_btn.configure(state="normal")
