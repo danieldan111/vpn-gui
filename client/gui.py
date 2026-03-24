@@ -114,38 +114,52 @@ class VPNClientApp(ctk.CTk):
         commands.get(cmd, self.handle_error)(data)
 
     # ---------------- VPN Subprocess Control ---------------- #
-    def start_vpn(self, srv):
-        """Launches the VPN client subprocess and switches to the Connected Page."""
-        self.stop_vpn(switch_page=False) # Clean up any existing connection first
-        
+    def start_vpn(self, srv, show_console=False):
+        self.stop_vpn(switch_page=False)
+
+        import os, shutil
+
         target_ip = srv.get("host", "127.0.0.1")
         target_port = str(srv.get("port", "8000"))
-        
+
+        script_path = os.path.join("client", "client.py")
+
         print(f"[GUI] Launching VPN subprocess for {srv['name']} at {target_ip}:{target_port}...")
-        
+
         try:
-            self.active_vpn_process = subprocess.Popen(
-                [sys.executable, "vpn_client.py", target_ip, target_port]
-            )
+            cmd = [sys.executable, script_path, target_ip, target_port]
+            kwargs = {}
+
+            if sys.platform.startswith("linux"):
+                if show_console:
+                    terminal = shutil.which("xterm") or shutil.which("gnome-terminal") or shutil.which("konsole")
+                    if terminal:
+                        if "xterm" in terminal:
+                            cmd = [terminal, "-hold", "-e"] + cmd
+                        else:
+                            cmd = [terminal, "--"] + cmd
+                    else:
+                        messagebox.showwarning("Warning", "No terminal found, running in background.")
+                else:
+                    log_file = open("vpn_client.log", "a")
+                    kwargs["stdout"] = log_file
+                    kwargs["stderr"] = log_file
+
+            elif sys.platform == "win32":
+                if show_console:
+                    kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
+                else:
+                    kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+            self.active_vpn_process = subprocess.Popen(cmd, **kwargs)
+
             self.connected_server = srv
-            self.show_frame("ConnectedPage")
-            
+
+            # Check process actually started
+            self.after(500, self._check_vpn_started)
+
         except Exception as e:
             messagebox.showerror("Execution Error", f"Failed to start VPN client:\n{e}")
-
-    def stop_vpn(self, switch_page=True):
-        """Kills the running VPN client subprocess."""
-        if self.active_vpn_process is not None:
-            if self.active_vpn_process.poll() is None: 
-                self.active_vpn_process.terminate()
-                self.active_vpn_process.wait() # Ensure it has fully closed
-            
-            print("[GUI] Terminated VPN connection.")
-            self.active_vpn_process = None
-            self.connected_server = None
-            
-        if switch_page:
-            self.show_frame("VPNPage")
 
 
 # ---------------- Pages ---------------- #
