@@ -205,6 +205,7 @@ def handle_client(conn, addr):
         response, current_user, current_vpn_server = COMMANDS.get(cmd, handle_unknown)(data, addr, current_user, current_vpn_server)
 
         try:
+            print(response)
             secure.send_json(response)
         except Exception:
             break
