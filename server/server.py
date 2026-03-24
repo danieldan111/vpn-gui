@@ -117,12 +117,11 @@ def logoff(username, addr):
 
 def vpn_server_login(data, addr):
     server_name = data.get("server_name")
-    
-    # Extract the VPN's UDP port from the JSON (default to 50505 if missing)
     vpn_port = data.get("port", 50505) 
     
-    # addr is a tuple of (IP, TCP_PORT). We just want the IP.
-    client_ip = addr[0]                
+    # Try to get the IP from the JSON payload first. 
+    # If it's not there, fallback to the socket IP (addr[0]).
+    client_ip = data.get("host", addr[0])                
 
     if not server_name:
          return {"cmd": "EROR", "msg": "Missing server name"}
@@ -131,12 +130,12 @@ def vpn_server_login(data, addr):
     if is_valid:
         with server_lock:
             available_servers[server_name] = {
-                "host": client_ip,            # Save the IP
-                "port": vpn_port,             # Save the UDP port
+                "host": client_ip,            # Save the manually advertised IP
+                "port": vpn_port,             
                 "display_name": display_name,
-                "load": "12%"                 # Mock load
+                "load": "12%"                 
             }
-        print(f"[BROKER] VPN Node '{display_name}' connected from {client_ip}:{vpn_port}")
+        print(f"[BROKER] VPN Node '{display_name}' connected, advertising {client_ip}:{vpn_port}")
         return {"cmd": "CNFM", "action": "SLGN"}
     return {"cmd": "EROR", "msg": "Unknown VPN server"}
 
